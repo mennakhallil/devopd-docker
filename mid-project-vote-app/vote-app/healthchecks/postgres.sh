@@ -1,21 +1,18 @@
-#!/bin/bash
-set -eo pipefail
+#!/bin/sh
+set -e
 
-host="$(hostname -i || echo '127.0.0.1')"
-user="${POSTGRES_USER:-postgres}"
-db="${POSTGRES_DB:-$POSTGRES_USER}"
-export PGPASSWORD="${POSTGRES_PASSWORD:-}"
+HOST="${POSTGRES_HOST:-127.0.0.1}"
+PORT="${POSTGRES_PORT:-5432}"
 
-args=(
-	# force postgres to not use the local unix socket (test "external" connectibility)
-	--host "$host"
-	--username "$user"
-	--dbname "$db"
-	--quiet --no-align --tuples-only
-)
-
-if select="$(echo 'SELECT 1' | psql "${args[@]}")" && [ "$select" = '1' ]; then
-	exit 0
+# تأكد من وجود netcat
+if ! command -v nc >/dev/null 2>&1; then
+    echo "Installing netcat..."
+    apk add --no-cache netcat-openbsd
 fi
 
-exit 1
+# TCP healthcheck
+if nc -z "$HOST" "$PORT"; then
+    exit 0
+else
+    exit 1
+fi

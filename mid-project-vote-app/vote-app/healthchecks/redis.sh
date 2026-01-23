@@ -1,10 +1,21 @@
 #!/bin/sh
-set -eo pipefail
+set -e
 
-host="$(hostname -i || echo '127.0.0.1')"
+# الافتراض: Redis host داخل نفس الشبكة
+HOST="${REDIS_HOST:-127.0.0.1}"
+PORT="${REDIS_PORT:-6379}"
 
-if ping="$(redis-cli -h "$host" ping)" && [ "$ping" = 'PONG' ]; then
-	exit 0
+# التأكد من تثبيت redis-cli
+if ! command -v redis-cli >/dev/null 2>&1; then
+    echo "redis-cli not found, installing..."
+    apk add --no-cache redis
 fi
 
-exit 1
+PING=$(redis-cli -h "$HOST" ping || true)
+
+if [ "$PING" = "PONG" ]; then
+    exit 0
+else
+    exit 1
+fi
+

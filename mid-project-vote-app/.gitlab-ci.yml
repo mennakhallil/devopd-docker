@@ -1,0 +1,336 @@
+stages:
+  - build
+  - scan
+  - push
+  - deploy
+  - deploy-secondary
+  - smoke-test
+  - notify
+
+############################################################################################
+.docker-build-push-template:
+  image: docker:latest
+  services:
+    - docker:dind
+  variables:
+    DOCKER_HOST: tcp://docker:2375
+    DOCKER_TLS_CERTDIR: ""
+    DOCKER_DRIVER: overlay2
+    DOCKER_BUILDKIT: "1" ##cache efficient docker builds##
+  before_script:
+    - echo "$DOCKER_PASSWORD" | docker login -u "$DOCKER_USER" --password-stdin
+
+############################################################################################
+##build vote docker image to docker hub##
+build-vote-doker-image-job:
+  stage: build
+  extends: .docker-build-push-template 
+  tags:
+    - ci-runner ##python:3.12 RUNNER TAG##
+  script:        
+    - cd vote-app/vote/
+    - export VERSION=$(date +%Y.%m.%d-%H%M)
+    - docker pull "$DOCKER_USER/mid-project-vote:latest" || true
+    - |
+      docker build \
+        --cache-from "$DOCKER_USER/mid-project-vote:latest" \
+        -t "$DOCKER_USER/mid-project-vote:$VERSION" \
+        . 
+    - docker save "$DOCKER_USER/mid-project-vote:$VERSION" -o ../../vote-image.tar ##local save image to a tar file to be used in next job##
+    - sh -c "echo $VERSION > ../../vote-version.txt" ##save version to a text file to be used in next job##
+  artifacts:
+    paths:
+      - vote-image.tar ##local saved image tar file /home/mid-project-vote-app#
+      - vote-version.txt ##version text file /home/mid-project-vote-app## ## cat vote-version.txt # 2026.01.19-1131 ##
+    expire_in: 1 hour ##keep the artifact for 1 hour to allow next job to use it##
+  only:
+    - main
+
+############################################################################################
+##build result docker image to docker hub##  
+build-result-doker-image-job:
+  stage: build
+  extends: .docker-build-push-template
+  tags:
+    - ci-runner ##python:3.12 RUNNER TAG##
+  script:
+    - cd vote-app/result/
+    - export VERSION=$(date +%Y.%m.%d-%H%M)
+    - docker pull "$DOCKER_USER/mid-project-result:latest" || true
+    - |
+      docker build \
+        --cache-from "$DOCKER_USER/mid-project-result:latest" \
+        -t "$DOCKER_USER/mid-project-result:$VERSION" \
+        .
+    - docker save "$DOCKER_USER/mid-project-result:$VERSION" -o ../../result-image.tar
+    - echo $VERSION > ../../result-version.txt
+  artifacts:
+    paths:
+      - result-image.tar
+      - result-version.txt
+    expire_in: 1 hour ##keep the artifact for 1 hour to allow next job to use it##
+  only:
+    - main
+
+############################################################################################
+##build worker docker image to docker hub##
+build-worker-doker-image-job:
+  stage: build  
+  extends: .docker-build-push-template
+  tags:
+    - ci-runner ##python:3.12 RUNNER TAG##
+  script:
+    - cd vote-app/worker/
+    - export VERSION=$(date +%Y.%m.%d-%H%M)
+    - docker pull "$DOCKER_USER/mid-project-worker:latest" || true
+    - |
+      docker build \
+        --cache-from "$DOCKER_USER/mid-project-worker:latest" \
+        -t "$DOCKER_USER/mid-project-worker:$VERSION" \
+        .
+    - docker save "$DOCKER_USER/mid-project-worker:$VERSION" -o ../../worker-image.tar
+    - echo $VERSION > ../../worker-version.txt
+  artifacts:
+    paths:
+      - worker-image.tar
+      - worker-version.txt
+    expire_in: 1 hour   ##keep the artifact for 1 hour to allow next job to use it##
+  only:
+    - main
+
+############################################################################################
+##image: aquasec/trivy:latest doesnot have docker cli so using docker:latest image and installing trivy##
+##scan docker images using trivy##
+scan-docker-images-job:
+  stage: scan
+  image: docker:latest
+  tags:
+    - ci-runner ##python:3.12 RUNNER TAG##
+  services:
+    - docker:dind
+  variables:
+    DOCKER_HOST: tcp://docker:2375
+    DOCKER_TLS_CERTDIR: ""
+  dependencies:
+    - build-vote-doker-image-job
+    - build-result-doker-image-job
+    - build-worker-doker-image-job
+  before_script:
+    - apk add --no-cache curl
+    - curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh | sh
+    - export PATH="$PATH:$(pwd)/bin"
+    - trivy --version
+  script:
+    - export VOTE_VERSION=$(cat vote-version.txt)
+    - export RESULT_VERSION=$(cat result-version.txt)
+    - export WORKER_VERSION=$(cat worker-version.txt)
+    - docker load -i vote-image.tar
+    - docker load -i result-image.tar 
+    - docker load -i worker-image.tar
+    - trivy image --severity HIGH,CRITICAL "$DOCKER_USER/mid-project-vote:$VOTE_VERSION"
+    - trivy image --severity HIGH,CRITICAL "$DOCKER_USER/mid-project-result:$RESULT_VERSION"
+    - trivy image --severity HIGH,CRITICAL "$DOCKER_USER/mid-project-worker:$WORKER_VERSION"
+    - echo "Security scan completed!"
+  only:   
+    - main
+
+############################################################################################
+##push docker images to docker hub##
+push-docker-images-job:
+  stage: push
+  image: docker:latest
+  services:
+    - docker:dind
+  variables:
+    DOCKER_HOST: tcp://docker:2375
+    DOCKER_TLS_CERTDIR: ""
+  extends: .docker-build-push-template
+  tags:
+    - ci-runner ##python:3.12 RUNNER TAG##
+  dependencies:
+    - build-vote-doker-image-job
+    - build-result-doker-image-job
+    - build-worker-doker-image-job
+  before_script:
+    - echo "$DOCKER_PASSWORD" | docker login -u "$DOCKER_USER" --password-stdin
+  script:
+    - export VOTE_VERSION=$(cat vote-version.txt)
+    - export RESULT_VERSION=$(cat result-version.txt)
+    - export WORKER_VERSION=$(cat worker-version.txt)
+    - docker load -i vote-image.tar ###load local saved image tar file##
+    - docker load -i result-image.tar 
+    - docker load -i worker-image.tar
+    - docker push "$DOCKER_USER/mid-project-vote:$VOTE_VERSION"
+    - docker push "$DOCKER_USER/mid-project-result:$RESULT_VERSION"
+    - docker push "$DOCKER_USER/mid-project-worker:$WORKER_VERSION"
+    - docker tag "$DOCKER_USER/mid-project-vote:$VOTE_VERSION" "$DOCKER_USER/mid-project-vote:latest"
+    - docker tag "$DOCKER_USER/mid-project-result:$RESULT_VERSION" "$DOCKER_USER/mid-project-result:latest"
+    - docker tag "$DOCKER_USER/mid-project-worker:$WORKER_VERSION" "$DOCKER_USER/mid-project-worker:latest"
+    - docker push "$DOCKER_USER/mid-project-vote:latest"
+    - docker push "$DOCKER_USER/mid-project-result:latest"
+    - docker push "$DOCKER_USER/mid-project-worker:latest"
+  only:
+    - main
+
+############################################################################################
+deploy-job:
+  stage: deploy 
+  tags:
+    - cd-runner ##docker:latest RUNNER TAG##
+  before_script:
+    - until docker info; do sleep 1; done
+    - echo "$DOCKER_PASSWORD" | docker login -u "$DOCKER_USER" --password-stdin
+  script:
+    - echo "Deploying application..."
+   ## Pull latest images ##
+   
+    - docker pull "$DOCKER_USER/mid-project-vote:latest"
+    - docker pull "$DOCKER_USER/mid-project-worker:latest"
+    - docker pull "$DOCKER_USER/mid-project-result:latest"
+
+    ## Stop and remove existing containers ##
+    - docker stop vote result worker redis db || true
+    - docker rm vote result worker redis db || true
+    
+    ## Create network ##
+    - docker network create front-tier || true
+    - docker network create back-tier || true
+
+    ##Create volumes##
+    - docker volume create redis_data || true
+    - docker volume create postgres_data || true
+
+    
+    ## Redis and postgres with healthcheck ##
+    # Redis
+    - |
+        docker run -d \
+        --name redis \
+        --network back-tier \
+        --restart unless-stopped \
+        -v redis_data:/data \
+        -v $(pwd)/vote-app/healthchecks:/healthchecks \
+        --health-cmd="redis-cli ping || exit 1" \
+        --health-interval=5s \
+        --health-timeout=3s \
+        --health-retries=5 \
+        redis:6.2-alpine sh -c "apk add --no-cache redis && redis-server --appendonly yes"
+
+    
+# Postgres
+    - |
+        docker run -d \
+        --name db \
+        --network back-tier \
+        --restart unless-stopped \
+        -e POSTGRES_USER=postgres \
+        -e POSTGRES_PASSWORD=postgres \
+        -e POSTGRES_DB=postgres \
+        -v postgres_data:/var/lib/postgresql/data \
+        -v $(pwd)/vote-app/healthchecks:/healthchecks \
+        --health-cmd="/healthchecks/postgres.sh" \
+        --health-interval=5s \
+        --health-timeout=3s \
+        --health-retries=5 \
+        postgres:13.21-alpine3.20
+
+   
+    
+    ## Wait for Redis and DB to be healthy ##
+    - echo "Waiting for Redis and PostgreSQL to be healthy..."
+    - |
+      until [ "$(docker inspect -f '{{.State.Health.Status}}' redis)" == "healthy" ]; do
+        echo "Waiting for Redis..."
+        sleep 2
+      done
+    - |
+      until [ "$(docker inspect -f '{{.State.Health.Status}}' db)" == "healthy" ]; do
+        echo "Waiting for PostgreSQL..."
+        sleep 2
+      done
+    - echo "Redis and PostgreSQL are healthy!"
+    - docker ps #to verify redis and db are running healthy## 
+    ## Vote App ##
+    - |
+      docker run -d \
+        --name vote \
+        --network front-tier \
+        --restart unless-stopped \
+        -p 8080:80 \
+        -e REDIS_HOST=redis \
+        "$DOCKER_USER/mid-project-vote:latest"
+    - docker network connect back-tier vote
+    
+    ## Worker App ##
+    - |
+      docker run -d \
+        --name worker \
+        --network back-tier \
+        --restart unless-stopped \
+        -e REDIS_HOST=redis \
+        -e POSTGRES_HOST=db \
+        -e POSTGRES_USER=postgres \
+        -e POSTGRES_PASSWORD=postgres \
+        "$DOCKER_USER/mid-project-worker:latest"
+    
+    ## Result App ##
+    - |
+      docker run -d \
+        --name result \
+        --network front-tier \
+        --restart unless-stopped \
+        -p 8081:80 \
+        -e POSTGRES_HOST=db \
+        -e POSTGRES_USER=postgres \
+        -e POSTGRES_PASSWORD=postgres \
+        "$DOCKER_USER/mid-project-result:latest"
+    - docker network connect back-tier result  
+    
+    ## Verify all containers are running ##
+    - docker ps
+    - echo "Deployment completed!"
+    - echo " Vote App http://$SERVER_IP:8080"
+    - echo " Result App http://$SERVER_IP:8081"
+    
+  only:
+    - main
+
+
+# ----------------- Deploy Secondary -----------------
+ansible-deploy-job:
+  stage: deploy-secondary
+  image: cytopia/ansible:latest
+  tags:
+    - cd-runner
+  before_script:
+    - mkdir -p ~/.ssh
+    - echo "$SSH_PRIVATE_KEY" > ~/.ssh/id_ed25519
+    - chmod 600 ~/.ssh/id_ed25519
+    - ssh-keyscan -H $SECOND_SERVER_IP >> ~/.ssh/known_hosts
+  script:
+    - ansible-playbook -i inventory.yml deploy.yml -e docker_user=$DOCKER_USER -e docker_password=$DOCKER_PASSWORD
+
+
+# ----------------- Smoke Test -----------------
+smoke-test-job:
+  stage: smoke-test
+  image: curlimages/curl
+  tags:
+  - cd-runner
+  script:
+    - curl -f http://$SERVER_IP:8080
+    - curl -f http://$SERVER_IP:8081
+    - curl -f http://$SECOND_SERVER_IP:8080
+    - curl -f http://$SECOND_SERVER_IP:8081
+
+# ----------------- Telegram Notification ----------------- 
+notify-job:
+  stage: notify 
+  image: curlimages/curl:latest 
+  tags:
+    - ci-runner
+  script: |
+    curl -s -X POST "https://api.telegram.org/bot$TELEGRAM_BOT_TOKEN/sendMessage" \
+      -d chat_id="$TELEGRAM_CHAT_ID" \
+      -d text="Pipeline finished! Vote app: http://$SERVER_IP:8080, Result app: http://$SERVER_IP:8081, Trivy reports available as artifacts."
+  when: always

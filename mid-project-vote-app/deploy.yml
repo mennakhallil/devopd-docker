@@ -1,0 +1,58 @@
+- name: Deploy mid-project-vote-app on secondary server
+  hosts: secondary
+  become: true
+
+  tasks:
+    - name: Stop containers
+      shell: docker stop vote worker result redis db || true
+
+    - name: Remove containers
+      shell: docker rm vote worker result redis db || true
+
+    - name: Create networks
+      shell: |
+        docker network create front-tier || true
+        docker network create back-tier || true
+
+    - name: Create volumes
+      shell: |
+        docker volume create redis_data || true
+docker volume create postgres_data || true  
+    - name: Docker login
+      shell: echo "{{ docker_password }}" | docker login -u "{{ docker_user }}" --password-stdin 
+             
+    - name: Pull images
+      shell: |
+        docker pull {{ docker_user }}/mid-project-vote:latest
+        docker pull {{ docker_user }}/mid-project-worker:latest
+        docker pull {{ docker_user }}/mid-project-result:latest
+
+    - name: Run Redis
+      shell: docker run -d \
+        --name redis \
+        --network back-tier \
+        -v redis_data:/data \
+        redis:6.2-alpine
+
+    - name: Run Postgres
+      shell: docker run -d \
+        --name db \
+        --network back-tier \
+        -e POSTGRES_USER=postgres \
+        -e POSTGRES_PASSWORD=postgres \
+        -e POSTGRES_DB=postgres \
+        -v postgres_data:/var/lib/postgresql/data \
+        postgres:13.21-alpine3.20
+
+    - name: Run Vote
+      shell: |
+        docker run -d --name vote --network front-tier -p 8080:80 {{ docker_user }}/mid-project-vote:latest
+        docker network connect back-tier vote
+
+    - name: Run Worker
+      shell: docker run -d --name worker --network back-tier {{ docker_user }}/mid-project-worker:latest
+
+    - name: Run Result
+      shell: |
+        docker run -d --name result --network front-tier -p 8081:80 {{ docker_user }}/mid-project-result:latest
+        docker network connect back-tier result

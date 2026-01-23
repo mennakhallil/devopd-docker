@@ -1,0 +1,10 @@
+[init]
+	defaultBranch = none
+[fetch]
+	recurseSubmodules = false
+[credential]
+	interactive = never
+[gc]
+	autoDetach = false
+[include]
+	path = /home/mid-project-vote-app/builds/ldx0lvsbv/0/mennakhalil/mid-project-vote-app.tmp/.gitlab-runner.ext.conf
